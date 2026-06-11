@@ -89,11 +89,6 @@ type TelemetryConfig struct {
 	// should be included in the telemetry payload. Set via
 	// TGF_TELEMETRY_EXTRA_VARS as a comma-separated list.
 	ExtraVars []string
-
-	// SentryDSN is the Sentry DSN for error reporting.
-	// Set via TGF_SENTRY_DSN environment variable.
-	// When set, errors (exit_code != 0) are additionally reported to Sentry.
-	SentryDSN string
 }
 
 const (
@@ -101,7 +96,6 @@ const (
 	envTelemetryEndpoint  = "TGF_TELEMETRY_ENDPOINT"
 	envTelemetryRedisKey  = "TGF_TELEMETRY_REDIS_KEY"
 	envTelemetryExtraVars = "TGF_TELEMETRY_EXTRA_VARS"
-	envSentryDSN          = "TGF_SENTRY_DSN"
 
 	defaultRedisKey = "filebeat"
 )
@@ -131,8 +125,6 @@ func LoadTelemetryConfig() TelemetryConfig {
 			}
 		}
 	}
-
-	cfg.SentryDSN = os.Getenv(envSentryDSN)
 
 	return cfg
 }
@@ -224,6 +216,21 @@ func PushEvent(cfg TelemetryConfig, event TGFEvent) {
 		return
 	}
 
+	// Resolve extra environment variables into the event.
+	// These are read at push time, after docker.call() has set all
+	// config.Environment vars via os.Setenv.
+	if len(cfg.ExtraVars) > 0 {
+		extra := make(map[string]string)
+		for _, name := range cfg.ExtraVars {
+			if val := os.Getenv(name); val != "" {
+				extra[name] = val
+			}
+		}
+		if len(extra) > 0 {
+			event.Extra = extra
+		}
+	}
+
 	logEvent := buildLogEvent(event)
 
 	payload, err := json.Marshal(logEvent)
@@ -236,23 +243,6 @@ func PushEvent(cfg TelemetryConfig, event TGFEvent) {
 
 	if err := pushToEndpoint(cfg.Endpoint, cfg.RedisKey, payload); err != nil {
 		log.Warningf("Telemetry: failed to push event: %v", err)
-	}
-}
-
-// ResolveExtraVars populates event.Extra with environment variable values
-// specified in cfg.ExtraVars. Should be called once before PushEvent and PushToSentry.
-func ResolveExtraVars(cfg TelemetryConfig, event *TGFEvent) {
-	if len(cfg.ExtraVars) == 0 {
-		return
-	}
-	extra := make(map[string]string)
-	for _, name := range cfg.ExtraVars {
-		if val := os.Getenv(name); val != "" {
-			extra[name] = val
-		}
-	}
-	if len(extra) > 0 {
-		event.Extra = extra
 	}
 }
 
