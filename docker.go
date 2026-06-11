@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -21,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	"github.com/blang/semver/v4"
 	"github.com/coveooss/gotemplate/v3/collections"
+	"github.com/coveooss/gotemplate/v3/utils"
 	"github.com/coveooss/multilogger/errors"
 	"github.com/coveooss/multilogger/reutils"
 	"github.com/docker/docker/api/types"
@@ -214,12 +216,22 @@ func (docker *dockerConfig) call() int {
 	dockerArgs = append(dockerArgs, imageName)
 	dockerArgs = append(dockerArgs, command...)
 	dockerCmd := exec.Command("docker", dockerArgs...)
-	dockerCmd.Stdin, dockerCmd.Stdout = os.Stdin, os.Stdout
+	dockerCmd.Stdin = os.Stdin
+
+	// Capture the tail of stdout for telemetry error reporting.
+	// Terraform/terragrunt write errors to stdout, not stderr.
+	var stdoutTail tailBuffer
+	stdoutTail.Init(4096) // keep last 4KB of output
+	dockerCmd.Stdout = io.MultiWriter(os.Stdout, &stdoutTail)
+
 	var stderr bytes.Buffer
 	dockerCmd.Stderr = &stderr
 
 	log.Debug(color.HiBlackString(strings.Join(dockerCmd.Args, " ")))
 
+	if err := runCommands(config.runBeforeCommands); err != nil {
+		return -1
+	}
 	if err := dockerCmd.Run(); err != nil {
 		if stderr.Len() > 0 {
 			log.Errorf("%s\n%s %s", stderr.String(), dockerCmd.Args[0], strings.Join(dockerArgs, " "))
@@ -228,7 +240,39 @@ func (docker *dockerConfig) call() int {
 			}
 		}
 	}
-	return dockerCmd.ProcessState.Sys().(syscall.WaitStatus).ExitStatus()
+
+	exitCode := dockerCmd.ProcessState.Sys().(syscall.WaitStatus).ExitStatus()
+
+	// Capture error output for telemetry
+	if exitCode != 0 {
+		if tail := stdoutTail.String(); tail != "" {
+			lastRunError = tail
+		} else if stderr.Len() > 0 {
+			lastRunError = stderr.String()
+		}
+	}
+	if err := runCommands(config.runAfterCommands); err != nil {
+		log.Error(err)
+	}
+
+	return exitCode
+}
+
+func runCommands(commands []string) error {
+	for _, script := range commands {
+		cmd, tempFile, err := utils.GetCommandFromString(script)
+		if err != nil {
+			return err
+		}
+		if tempFile != "" {
+			defer func() { os.Remove(tempFile) }()
+		}
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, log, log
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Returns the image name to use
@@ -267,7 +311,7 @@ func (docker *dockerConfig) getImage() (name string) {
 		if out != nil {
 			log.Debug("Writing instructions to dockerfile")
 			ib.Instructions = fmt.Sprintf("FROM %s\n%s\n", name, ib.Instructions)
-			must(fmt.Fprint(out, ib.Instructions))
+			must(fmt.Fprintf(out, ib.Instructions))
 			must(out.Close())
 		}
 

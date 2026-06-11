@@ -30,7 +30,9 @@ func main() {
 			telemetryCfg := LoadTelemetryConfig()
 			event := NewTGFEvent(1, errMsg, duration)
 			event.WithConfig(lastRunConfig)
+			ResolveExtraVars(telemetryCfg, &event)
 			PushEvent(telemetryCfg, event)
+			PushToSentry(telemetryCfg, event)
 
 			if _, isManaged := err.(errors.Managed); String(os.Getenv(envDebug)).ParseBool() || !isManaged {
 				log.Errorf("%[1]v (%[1]T)", err)
@@ -57,7 +59,9 @@ func main() {
 	}
 	event := NewTGFEvent(exitCode, errMsg, duration)
 	event.WithConfig(lastRunConfig)
+	ResolveExtraVars(telemetryCfg, &event)
 	PushEvent(telemetryCfg, event)
+	PushToSentry(telemetryCfg, event)
 
 	os.Exit(exitCode)
 }

@@ -66,20 +66,16 @@ type TGFConfig struct {
 	RequiredVersionRange    string            `yaml:"required-image-version,omitempty" json:"required-image-version,omitempty" hcl:"required-image-version,omitempty"`
 	RecommendedTGFVersion   string            `yaml:"tgf-recommended-version,omitempty" json:"tgf-recommended-version,omitempty" hcl:"tgf-recommended-version,omitempty"`
 	Environment             map[string]string `yaml:"environment,omitempty" json:"environment,omitempty" hcl:"environment,omitempty"`
+	RunBefore               string            `yaml:"run-before,omitempty" json:"run-before,omitempty" hcl:"run-before,omitempty"`
+	RunAfter                string            `yaml:"run-after,omitempty" json:"run-after,omitempty" hcl:"run-after,omitempty"`
 	Aliases                 map[string]string `yaml:"alias,omitempty" json:"alias,omitempty" hcl:"alias,omitempty"`
 	UpdateVersion           string            `yaml:"update-version,omitempty" json:"update-version,omitempty" hcl:"update-version,omitempty"`
 	AutoUpdateDelay         time.Duration     `yaml:"auto-update-delay,omitempty" json:"auto-update-delay,omitempty" hcl:"auto-update-delay,omitempty"`
 	AutoUpdate              bool              `yaml:"auto-update,omitempty" json:"auto-update,omitempty" hcl:"auto-update,omitempty"`
 
-	imageBuildConfigs []TGFConfigBuild // List of config built from previous build configs
+	runBeforeCommands, runAfterCommands []string
+	imageBuildConfigs                   []TGFConfigBuild // List of config built from previous build configs
 	tgf                                 *TGFApplication
-}
-
-// TGFConfigBootstrap contains an entry specifying how to bootstrap the configuration
-type TGFConfigBootstrap struct {
-	ConfigLocation string `yaml:"config-location,omitempty" json:"config-location,omitempty" hcl:"config-location,omitempty"`
-	ConfigPaths    string `yaml:"config-paths,omitempty" json:"config-paths,omitempty" hcl:"config-paths,omitempty"`
-	SSMPath        string `yaml:"ssm-path,omitempty" json:"ssm-path,omitempty" hcl:"ssm-path,omitempty"`
 }
 
 // TGFConfigBuild contains an entry specifying how to customize the current docker image
@@ -334,43 +330,6 @@ func (config *TGFConfig) InitAWS() error {
 	return nil
 }
 
-// We use this structure to keep track of the config sources and their content separately
-type configData struct {
-	Name   string
-	Raw    string
-	Config *TGFConfig
-}
-
-// setBootstrapVariablesFromLocalFiles will read the local config files
-// and attempt to set the config-location, config-paths and ssm-path values.
-func (config *TGFConfig) setBootstrapVariablesFromLocalFiles() {
-	app := config.tgf
-	for _, configFile := range config.findConfigFiles(must(os.Getwd()).(string)) {
-		log.Debugln("Reading bootstrap configuration from", configFile)
-		readBytes, err := os.ReadFile(configFile)
-		content := string(readBytes)
-
-		if err != nil {
-			log.Errorf("Error while loading configuration file %s\n%v", configFile, err)
-			continue
-		}
-		localConfig := TGFConfigBootstrap{}
-		if err := collections.ConvertData(content, &localConfig); err != nil {
-			log.Errorf("Error while loading configuration from %s\nConfiguration file must be valid YAML, JSON or HCL\n%v\nContent:\n%s", configFile, err, content)
-			continue
-		}
-		if app.ConfigLocation == "" && localConfig.ConfigLocation != "" {
-			app.ConfigLocation = localConfig.ConfigLocation
-		}
-		if app.ConfigFiles == "" && localConfig.ConfigPaths != "" {
-			app.ConfigFiles = localConfig.ConfigPaths
-		}
-		if app.PsPath == defaultSSMParameterFolder && localConfig.SSMPath != "" {
-			app.PsPath = localConfig.SSMPath
-		}
-	}
-}
-
 // setDefaultValues sets the uninitialized values from the config files and the parameter store
 // Priorities (Higher overwrites lower values):
 // 1. Configuration location files
@@ -380,6 +339,12 @@ func (config *TGFConfig) setBootstrapVariablesFromLocalFiles() {
 func (config *TGFConfig) setDefaultValues() {
 	app := config.tgf
 
+	//app.PsPath, app.ConfigLocation, app.ConfigFiles
+	type configData struct {
+		Name   string
+		Raw    string
+		Config *TGFConfig
+	}
 	configsData := []configData{}
 
 	// --config-dump output must not contain any logs to be valid YAML
@@ -387,9 +352,6 @@ func (config *TGFConfig) setDefaultValues() {
 	if config.tgf.ConfigDump {
 		log.SetStdout(os.Stdout)
 	}
-
-	// First, read local config files for bootstrap variables.
-	config.setBootstrapVariablesFromLocalFiles()
 
 	// Fetch SSM configs
 	if config.awsConfigExist() {
@@ -456,7 +418,15 @@ func (config *TGFConfig) setDefaultValues() {
 				source:       configData.Name,
 			}}, config.imageBuildConfigs...)
 		}
+		if configData.Config.RunBefore != "" {
+			config.runBeforeCommands = append(config.runBeforeCommands, configData.Config.RunBefore)
+		}
+		if configData.Config.RunAfter != "" {
+			config.runAfterCommands = append(config.runAfterCommands, configData.Config.RunAfter)
+		}
 	}
+	// We reverse the execution of before scripts to ensure that more specific commands are executed last
+	config.runBeforeCommands = collections.AsList(config.runBeforeCommands).Reverse().Strings()
 }
 
 var reVersion = regexp.MustCompile(`(?P<version>\d+\.\d+(?:\.\d+){0,1})`)
